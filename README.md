@@ -1,209 +1,160 @@
 # SysCall Messenger (`scm`)
 
-> Make any Linux syscall or libc function call directly from your terminal.  
-> `scm` builds a real C program, compiles it with `gcc`/`clang`, and shows you exactly what the kernel returns.
+[![Linux](https://img.shields.io/badge/OS-Linux-blue.svg)](https://kernel.org)
+[![Language](https://img.shields.io/badge/Language-Rust%20%7C%20C-orange.svg)](https://www.rust-lang.org)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+> Execute raw Linux syscalls or standard `libc` functions directly from your terminal.  
+> `scm` dynamically constructs an optimized C program, resolves headers via `man` pages, compiles with `gcc` or `clang`, executes the kernel boundary call, and presents detailed return value and memory inspection metrics.
 
 ---
 
-## How it works
+## Key Features
 
-1. You type a C function call (e.g. `getcwd(buf, sizeof(buf))`)
-2. `scm` queries `man` pages to auto-discover required `#include` headers
-3. It wraps your call in a minimal C template, compiles it, and runs it
-4. The kernel's return value is printed
-5. If the return value looks like a memory address, `scm` can inspect what's there
+- **Direct Kernel Execution**: Call any Linux syscall (`SYS_write`, `SYS_getpid`, etc.) or `libc` function directly from command line arguments or an interactive REPL.
+- **Persistent Live Daemon Mode (`-R`)**: Keeps state, open file descriptors, allocated buffers, and process context active across commands within a single persistent OS process using background daemon sockets and dynamic `.so` compilation.
+- **Interactive Code Space Management**: Inspect (`cs`), focus on specific execution points (`fc`), insert (`ins`), or replace/delete (`rpc`) statements dynamically in your workspace.
+- **Focused Execution Control**: Focus evaluation on specific syscall statements while suppressing execution of statements below the focus point.
+- **Built-in Terminal Code Editor (`-e`)**: Built-in full-screen TUI code editor with INSERT (`INS`) and OVERWRITE (`OVR`) modes, mouse scrolling, and line editing.
+- **Automated Header & Variable Inference**: Detects missing `#include` directives and undeclared buffers (e.g., `char buf[4096]`), offering automatic fixes.
+- **Memory Address Inspector (`-m`)**: Automatically detects when return values represent kernel or user space virtual addresses (`0x10000`–`0x7FFFFFFFFFFF`), inspecting VMA memory maps (`/proc/self/maps`), string representations, and formatted hex dumps safely via `sigsetjmp`/`siglongjmp`.
+
+---
+
+## Architecture Overview
 
 ```
-your input → C template → gcc → kernel → return value → (optional) memory inspector
+User Input / REPL Command
+          │
+          ▼
+ Auto-Header Discovery & Variable Inference
+          │
+          ▼
+    C Code Space Generation
+          │
+   ┌──────┴─────────────────────────────────┐
+   │                                        │
+[Single-Shot Mode]             [Persistent Session Mode (-R)]
+   │                                        │
+Compile & Execute Binary        Compile snippet to .so shared object
+   │                                        │
+Print Kernel Return Value       Dispatch via UNIX socket to Daemon Worker
+                                            │
+                                Execute under fixed PID & return result
 ```
 
 ---
 
-## Installation / Running
+## Installation & Setup
+
+### Prerequisites
+- Linux kernel 4.x or newer
+- Rust toolchain (`cargo`, `rustc`)
+- C compiler (`gcc` or `clang`)
+
+### Building & Installing
 
 ```bash
-# Build
+# Clone the repository
+git clone https://github.com/example/syscall-messenger.git
+cd syscall-messenger
+
+# Build release binary
 cargo build --release
 
-# Run directly
-./run.sh [flags] '<call>'
-
-# Or use the compiled binary
-./target/release/scm [flags] '<call>'
-
-# Install globally (optional)
+# Install binary to ~/.cargo/bin (recommended)
 cargo install --path .
-```
 
-> `run.sh` always builds the latest binary before launching, safe to use during development.
-
----
-
-## Usage
-
-```
-scm [flags] '<call>'     single-shot mode
-scm [flags]              interactive REPL (type calls one by one)
+# Or run using the launcher script
+./run.sh [flags] '<call>'
 ```
 
 ---
 
-## Flags
-
-| Flag | Long form | Description |
-|------|-----------|-------------|
-| `-R` | `--runner-session` | Launch interactive REPL in **persistent session mode**. File descriptors, variable declarations, and state persist across commands. |
-| `-e` | `--editor` | Open the generated C source in the **built-in editor** before compiling. `Ctrl+S` saves and runs. `Esc` cancels. |
-| `-y` | `--yes` | Auto-confirm **all** prompts (compile, header fixes, memory inspect). Useful for scripting. |
-| `-m` | `--mem-inspect` | Always run the **memory inspector** when the kernel returns a pointer-like value — no prompt needed. |
-| `-c <bin>` | `--compiler <bin>` | Use a specific C compiler binary. Default search order: `gcc → clang → cc`. |
-| `--tui` | | Launch the split-pane **TUI messenger** interface. |
-| `-h` | `--help` | Print help text and exit. |
-
-Flags can be combined freely:
+## Quick Start & Usage
 
 ```bash
-scm -R                                 # interactive persistent session
-scm -R -y                              # persistent session + auto-confirm fixes
-scm -e -m 'getcwd(buf, sizeof(buf))'   # edit C, then auto-inspect pointer
-scm -y -m 'mmap(0,4096,3,34,-1,0)'    # skip all prompts, inspect result
-```
-
----
-
-## Examples
-
-```bash
-# Basic libc wrappers
-scm 'write(1, "hello\n", 6)'
+# Single-shot syscall execution
+scm 'write(1, "Hello Kernel\n", 13)'
 scm 'getpid()'
-scm 'getuid()'
+scm 'openat(AT_FDCWD, "src/main.rs", O_RDONLY)'
 
-# File operations
-scm 'openat(AT_FDCWD, "file.txt", O_RDONLY)'
-scm 'getcwd(buf, sizeof(buf))'
-scm 'mkdir("/tmp/testdir", 0755)'
+# Interactive persistent session (file descriptors & state persist)
+scm -R
 
-# Network
-scm 'socket(AF_INET, SOCK_STREAM, 0)'
-
-# Raw syscall numbers (via syscall(2))
-scm '(SYS_write, 1, "hello\n", 6)'
-scm '(SYS_getpid)'
-
-# Memory inspection (pointer return value)
-scm -m 'getcwd(buf, sizeof(buf))'
-
-# Edit the C before running
-scm -e 'openat(AT_FDCWD, "notes.txt", O_RDONLY)'
-
-# Use clang instead of gcc
-scm -c clang 'write(1, "hi\n", 3)'
-
-# Skip all prompts (useful in scripts)
-scm -y 'socket(AF_INET, SOCK_STREAM, 0)'
+# Interactive REPL with auto-confirmation and memory inspector
+scm -R -y -m
 ```
 
 ---
 
-## Code Space & Interactive REPL Commands
+## CLI Command-Line Options
 
-In `scm`, **Code Space** is where your C program code lives:
-- **Normal mode:** Code space is unique for every syscall command.
-- **Session mode (`-R`):** Code space persists and accumulates across calls.
-
-### Code Space REPL Commands
-
-| Command | Description |
-|---------|-------------|
-| `cs` | Instantly print the current C code space (with line numbers & syntax highlighting) |
-| `fc` | Focus kernel return value & errno evaluation on a specific line/syscall (`fc`, `fc L11`, `fc 1`) |
-| `ins L<num> NULL` | Insert a blank line at position `<num>` and shift below lines down |
-| `ins L<num> <code...>` | Insert a new code line at position `<num>` and shift below lines down |
-| `rpc L<num> <code...>` | Replace line `<num>` in code space (e.g. `rpc L12 read(fd, buf, 100)`) |
-| `rpc L<num> NULL` | Delete line `<num>` from code space (also accepts `del` or `delete`) |
-| `rpc L*` | Clear all lines from code space (also accepts `rpc L *`) |
-| `clr` | Clear code space and erase all memory, state, and variables |
-| `session` | View current code space state, headers, variables, and statements |
-| `exit` / `quit` / `q` | Exit REPL |
+| Flag | Long Form | Description |
+| :--- | :--- | :--- |
+| `-R` | `--runner-session` | Enable **Persistent Session Mode**. File descriptors, variables, and state remain active in a background daemon process across commands. |
+| `-q` | `--quick` | Enable **Quick Mode**. Suppresses C source code box previews and outputs kernel return values instantly. |
+| `-e` | `--editor` | Open the compiled C code space in the **built-in terminal editor** before execution. `Ctrl+S` compiles and runs; `Esc` cancels. |
+| `-y` | `--yes` | Auto-confirm all prompts (header fixes, compilation prompts, memory inspection). Ideal for scripting. |
+| `-m` | `--mem-inspect` | Automatically trigger memory inspection whenever a pointer-like kernel return address is returned. |
+| `-c` | `--compiler <bin>` | Specify compiler path (e.g., `-c /usr/bin/clang`). Defaults to searching `gcc` → `clang` → `cc`. |
+| | `--tui` | Launch the split-pane TUI messenger dashboard. |
+| `-h` | `--help` | Display usage options and version metadata. |
 
 ---
 
-## Interactive REPL
+## Code Space & REPL Command Reference
 
-Run `scm` with no arguments to enter the REPL (or `scm -R` for persistent session mode):
+In `scm`, **Code Space** represents your active C program workspace.
 
 ```
 ╔══════════════════════════════════════════════════════╗
 ║                   SysCall Messenger                  ║
 ╚══════════════════════════════════════════════════════╝
  [Persistent Runner Session (-R) Active — FDs, state, & code space persist]
- Type clr to clear code space. Type session to view state.
- Type rpc L<num> <code...> to edit line, rpc L<num> NULL to delete line, or rpc L* to erase all lines.
-
-scm> openat(AT_FDCWD, "src/main.rs", O_RDONLY)
-scm> read(3, buf, sizeof(buf) - 1)
-scm> rpc L12 NULL                                # Deletes line 12 from code space
-scm> rpc L*                                      # Erases all lines from code space
-scm> clr                                         # Clears code space & state completely
-scm> exit
+ Type cs to view code space. Type cs run to execute code space.
+ Type any function/syscall (e.g. openat(AT_FDCWD, "file.txt", O_RDONLY))
 ```
+
+### REPL Commands
+
+| Command | Usage | Description |
+| :--- | :--- | :--- |
+| `cs` | `cs` | Print the current C code space with line numbers and syntax highlighting. |
+| `cs run` | `cs run` | Compile and execute the current C code space. |
+| `fc` | `fc [L<num> \| num]` | Focus evaluation on line `L<num>` or statement `num`. Code past the focused statement is omitted from execution. |
+| `ins` | `ins L<num> <code...>` | Insert a line of code at position `<num>` and shift following lines down. Use `NULL` for blank lines. |
+| `rpc` | `rpc L<num> <code...>` | Replace line `<num>` with new code. Use `rpc L<num> NULL` or `del L<num>` to delete a line. |
+| `rpc L*` | `rpc L*` | Erase all statements from the active code space. |
+| `clr` | `clr` | Reset code space, clear terminal screen, and reset process state. |
+| `session` | `session` | Display session diagnostics, open headers, and declared variables. |
+| `exit` | `exit` / `quit` / `q` | Exit the REPL session. |
 
 ---
 
-## C Template
+## Focused Execution Control (`fc`)
 
+The `fc` command lets you focus kernel return value evaluation on a specific statement in your code space while suppressing statements that follow it:
 
-Every call is wrapped in this template:
+1. **Preceding Statements**: Statements prior to the focused line execute sequentially so dependencies (such as buffer initialization or file openings) are maintained.
+2. **Focused Statement**: The target statement's return value and `errno` are captured and displayed.
+3. **Subsequent Statements**: Statements below the focus point are excluded from the C execution block.
 
-```c
-#include <unistd.h>
-#include <sys/syscall.h>
-#include <stdio.h>
-#include <errno.h>
-#include <string.h>
-/* headers auto-discovered from man pages */
-
-int main(void)
-{
-    /* variable declarations auto-added if needed */
-    errno = 0;
-    long res = (long)( <your call> );
-    if (res < 0 || errno != 0) {
-        printf("\n[kernel return value: %ld (errno %d: %s)]\n",
-               res, errno, strerror(errno));
-    } else {
-        printf("\n[kernel return value: %ld]\n", res);
-    }
-    return 0;
-}
 ```
+scm> fc L11
+  ✓  focused kernel return value on statement [2] (C line L11): openat(AT_FDCWD, "src/main.rs", O_RDONLY)
+  save changes to code space? [Enter to save / q to discard]  
+  ✓  code space updated (use 'cs run' to execute)
 
-### Auto-fixes
-
-- **Missing headers** — if compilation fails because a type or constant is undefined, `scm` checks compiler errors and `man` pages and offers to add the missing `#include`.
-- **Undeclared variables** — if you use `buf`, `st`, `fd`, etc. without declaring them, `scm` infers a sensible declaration (e.g. `char buf[1024] = {0}`) and offers to insert it automatically.
+scm> cs run
+  [kernel return value: 3]
+```
 
 ---
 
 ## Memory Inspector (`-m`)
 
-When the kernel return value is in the user-space address range (`0x10000 – 0x7FFFFFFFFFFF`), `scm` recognises it as a virtual memory pointer.
-
-**With `-m` flag:** inspector runs automatically (no prompt).  
-**Without `-m` flag:** `scm` asks `inspect memory at that address? [Y/n]`.
-
-The inspector compiles a second C program that:
-
-| What | How |
-|------|-----|
-| Shows address in hex | `0x00007ffd...` |
-| Finds the memory region | reads `/proc/self/maps` → prints VMA name (e.g. `[stack]`, `[heap]`, library) |
-| String detection | `strnlen` up to 4096 bytes + printability check → prints string if clean |
-| 64-byte hex dump | formatted with ASCII panel (like `xxd`) |
-| Safe reads | uses `sigsetjmp`/`siglongjmp` to catch `SIGSEGV`/`SIGBUS` — never crashes |
-
-Example output for `getcwd(buf, sizeof(buf))`:
+When a kernel call yields a pointer or memory address in user space (`0x10000` to `0x7FFFFFFFFFFF`), `scm` activates memory inspection:
 
 ```
 ⚑  kernel returned 0x00007ffef566c640 — looks like a memory address!
@@ -211,66 +162,51 @@ Example output for `getcwd(buf, sizeof(buf))`:
   │  address  : 0x7ffef566c640
   │  hex      : 0x00007ffef566c640
   [maps region]  7ffef5659000-7ffef5679000 rw-p 00000000 00:00 0  [stack]
-  │  type hint : null-terminated C string (42 bytes)
-  │  value     : "/home/devansh/Documents/Sys-Call_Messenger"
+  │  type hint : null-terminated C string (37 bytes)
+  │  value     : "/home/user/projects/Sys-Call_Messenger"
   │  hex dump  : (up to 64 bytes)
 
-    0000: 2f 68 6f 6d 65 2f 64 65 76 61 6e 73 68 2f 44 6f  | /home/devansh/Do
-    0010: 63 75 6d 65 6e 74 73 2f 53 79 73 2d 43 61 6c 6c  | cuments/Sys-Call
-    0020: 5f 4d 65 73 73 65 6e 67 65 72 00 00 00 00 00 00  | _Messenger......
+    0000: 2f 68 6f 6d 65 2f 75 73 65 72 2f 70 72 6f 6a 65  | /home/user/proje
+    0010: 63 74 73 2f 53 79 73 2d 43 61 6c 6c 5f 4d 65 73  | cts/Sys-Call_Mes
+    0020: 73 65 6e 67 65 72 00 00 00 00 00 00 00 00 00 00  | senger..........
     0030: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  | ................
   └───────────────────────────────────────────────────────────
 ```
 
 ---
 
-## Built-in Editor (`-e`)
+## Built-in Terminal Editor (`-e`)
 
-The `-e` flag opens the generated C source in a full terminal editor before compiling.
+Launching with `-e` opens the generated C program in an interactive terminal editor before compilation.
 
-| Key | Action |
-|-----|--------|
-| `Ctrl+S` | Save and run immediately (no second prompt) |
-| `Esc` / `Ctrl+Q` | Cancel editing |
-| `i` | Switch to **INSERT** mode (blinking bar cursor) |
-| `o` | Switch to **OVERWRITE** mode (block cursor, default) |
-| `Delete` | Delete the entire current line |
-| `Ctrl+C` | Copy current line to internal clipboard |
-| `Ctrl+V` | Paste clipboard line(s) below cursor |
-| `Tab` | Insert 4 spaces |
-| `PageUp` / `PageDown` | Scroll by page |
-| Mouse wheel | Scroll viewport (terminal emulator scrollback unaffected) |
-| `Home` / `End` | Jump to start/end of line |
-
-The current line is highlighted. Mode (INS/OVR) is shown in the header and status bar, with colour changing per mode (green = INS, blue/amber = OVR).
+| Keybinding | Function |
+| :--- | :--- |
+| `Ctrl+S` | Save code space modifications and immediately compile/run. |
+| `Esc` / `Ctrl+Q` | Cancel editing session. |
+| `i` | Toggle **INSERT** mode (bar cursor). |
+| `o` | Toggle **OVERWRITE** mode (block cursor). |
+| `Delete` | Remove current line. |
+| `Ctrl+C` / `Ctrl+V` | Copy current line / Paste internal clipboard. |
+| `Mouse Wheel` | Viewport scrolling. |
 
 ---
 
-## Supported Syscalls
-
-All ~450+ Linux syscalls are supported — `scm` uses `syscall(2)` or the libc wrapper directly. Any call that compiles with `gcc` on your kernel will work.
-
-```bash
-scm 'read(0, buf, 1)'
-scm 'lseek(fd, 0, SEEK_END)'
-scm 'mmap(0, 4096, PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0)'
-scm 'fork()'
-scm 'ptrace(PTRACE_TRACEME, 0, 0, 0)'
-scm 'bpf(BPF_PROG_LOAD, 0, 0)'
-```
-
----
-
-## Project Structure
+## Codebase Organization
 
 ```
 src/
-  main.rs          — CLI flag parsing, REPL loop
-  compiler.rs      — C template builder, compiler, runner, memory inspector
-  editor.rs        — Built-in terminal C code editor (INS/OVR, mouse scroll)
-  messenger.rs     — FIFO IPC channel (used by --tui)
-  ui.rs            — Split-pane TUI interface
-  syscall_layer.rs — Low-level syscall expression layer
-  cli.rs           — Expression parser/executor
-run.sh             — Build-and-run launcher script
+├── main.rs          # CLI entry point, flag parsing, REPL execution loop
+├── compiler.rs      # C code generation, compiler dispatch, focus control, memory inspector
+├── daemon.rs        # Background UNIX domain socket server & persistent process manager
+├── editor.rs        # Built-in terminal TUI C source editor
+├── messenger.rs     # IPC FIFO messaging protocol
+├── syscall_layer.rs # Dynamic Linux syscall parser & signature layer
+├── ui.rs            # Split-pane TUI dashboard UI
+└── cli.rs           # Command & expression parser
 ```
+
+---
+
+## License
+
+Distributed under the MIT License. See `LICENSE` for details.
