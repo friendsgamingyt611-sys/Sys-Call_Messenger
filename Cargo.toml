@@ -1,0 +1,14 @@
+[package]
+name = "syscall-messenger"
+version = "1.0.0"
+edition = "2021"
+description = "A terminal messenger that communicates via raw Linux syscalls"
+authors = ["Sys-Call Messenger"]
+
+[[bin]]
+name = "scm"
+path = "src/main.rs"
+
+[dependencies]
+libc       = "0.2"
+crossterm  = "0.27"
