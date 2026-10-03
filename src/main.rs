@@ -129,7 +129,7 @@ fn clean_prompt_prefixes(raw: &str) -> String {
     clean.to_string()
 }
 
-fn process_command(
+pub fn process_command(
     input: &str,
     session: &mut compiler::SessionRunner,
     quick_mode: bool,
@@ -562,21 +562,13 @@ fn main() {
 
     // ── TUI mode ─────────────────────────────────────────────
     if tui_mode {
-        use std::sync::{Arc, Mutex};
-        use messenger::{init_channel, start_reader, MessengerState};
-        use ui::Tui;
-        let state = Arc::new(Mutex::new(MessengerState::new("user".to_string())));
-        match init_channel(&state) {
-            Ok((wfd, rfd)) => {
-                let mut s = state.lock().unwrap();
-                s.write_fd = Some(wfd);
-                s.read_fd = Some(rfd);
-            }
-            Err(e) => { eprintln!("\x1b[31merror:\x1b[0m {}", e); std::process::exit(1); }
-        }
-        start_reader(Arc::clone(&state));
-        let mut tui = Tui::new(Arc::clone(&state));
-        if let Err(e) = tui.run() { eprintln!("TUI error: {}", e); }
+        ui::run_tui(
+            runner_session,
+            quick_mode,
+            auto_confirm,
+            mem_inspect,
+            compiler.clone(),
+        );
         return;
     }
 

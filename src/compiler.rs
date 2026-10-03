@@ -979,6 +979,14 @@ pub fn print_codespace(session: &SessionRunner) {
     println!();
 }
 
+/// Get the raw C source string for the current session (used by TUI code space panel)
+pub fn get_session_source(session: &SessionRunner) -> Option<String> {
+    if session.statements.is_empty() && session.extra_vars.is_empty() {
+        return None;
+    }
+    Some(build_c_session_source(session))
+}
+
 /// Find a C compiler: user-specified > gcc > clang
 fn find_compiler(specified: Option<&str>) -> Result<String, String> {
     if let Some(c) = specified {
