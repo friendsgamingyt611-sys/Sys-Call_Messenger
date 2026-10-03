@@ -170,7 +170,6 @@ impl Tui {
         execute!(stdout,
             terminal::EnterAlternateScreen,
             cursor::Hide,
-            crossterm::event::EnableMouseCapture,
         )?;
 
         let result = self.event_loop(&mut stdout);
@@ -179,7 +178,6 @@ impl Tui {
         let _ = execute!(stdout,
             terminal::LeaveAlternateScreen,
             cursor::Show,
-            crossterm::event::DisableMouseCapture,
         );
         let _ = terminal::disable_raw_mode();
         result
