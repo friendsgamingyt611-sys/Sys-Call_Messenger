@@ -7,24 +7,25 @@
 //  │  SysCall Messenger  [-R] [-q]  stmts:3  focus:[2]  F1=help │  ← header
 //  ├─────────────────────────────────────────────────────────┤
 //  │                                                         │
-//  │   (scrollable output log — all results appear here)    │  ← main area
+//  │   (scrollable output log — clickable line selection)    │  ← main area
 //  │                                                         │
 //  ├─────────────────────────────────────────────────────────┤
-//  │  scm> _                                                 │  上手 input bar
+//  │  scm> _                                                 │  ← input bar
 //  └─────────────────────────────────────────────────────────┘
 //
 //  Keys:
-//    Enter        run command
-//    Up/Down      history / scroll output (or navigate modal)
+//    Enter        run command (or copy selected line if input empty)
+//    Up/Down      history / navigate & select output lines
 //    PgUp/PgDn   scroll output by page
 //    Home/End     cursor to start/end of input
-//    Left/Right   move cursor in input (or cycle compiler)
+//    Left/Right   move cursor in input (or cycle compiler in flags)
 //    Backspace    delete before cursor
 //    Delete       delete after cursor
 //    Ctrl+L       clear output
 //    F1           show/hide help overlay
 //    F2 or 'f'    show/hide flags & modes graphical modal
-//    Ctrl+C/Esc   quit
+//    Esc          clear line selection / close overlay / quit
+//    Ctrl+C       quit
 // ============================================================
 
 use std::io::{self, Write};
@@ -53,6 +54,7 @@ const RESULT_OK:   Color = Color::Rgb { r: 80,  g: 200, b: 120 };  // kernel res
 const RESULT_ERR:  Color = Color::Rgb { r: 220, g: 80,  b: 80  };  // error
 const RESULT_WARN: Color = Color::Rgb { r: 210, g: 180, b: 60  };  // warning/notice
 const CMD_ECHO:    Color = Color::Rgb { r: 100, g: 160, b: 255 };  // echoed command
+const SEL_BG:      Color = Color::Rgb { r: 35,  g: 75,  b: 140 };  // selected line blue bg
 
 // ── Output line kinds ─────────────────────────────────────────
 #[derive(Clone, PartialEq)]
@@ -142,6 +144,7 @@ pub struct Tui {
     show_help:          bool,
     show_flags:         bool,
     flags_selected_idx: usize,
+    selected_line:      Option<usize>,   // currently selected output line index
 }
 
 impl Tui {
@@ -157,6 +160,7 @@ impl Tui {
             show_help: false,
             show_flags: false,
             flags_selected_idx: 0,
+            selected_line: None,
         }
     }
 
@@ -209,6 +213,10 @@ impl Tui {
             }
             if self.show_help {
                 self.show_help = false;
+                return false;
+            }
+            if self.selected_line.is_some() {
+                self.selected_line = None;
                 return false;
             }
             return true; // Quit TUI
@@ -275,12 +283,23 @@ impl Tui {
             return false;
         }
 
-        // Open Flags modal if typing 'f' or 'F' when input bar is empty
+        // Open Flags modal if typing 'f' or 'F' when input bar is empty and no line selected
         if (key.code == KeyCode::Char('f') || key.code == KeyCode::Char('F'))
             && self.input.is_empty()
+            && self.selected_line.is_none()
             && key.modifiers.is_empty()
         {
             self.show_flags = true;
+            return false;
+        }
+
+        // Copy selected line into input bar if user presses 'c' or 'y' when input is empty & line selected
+        if (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('y'))
+            && self.input.is_empty()
+            && key.modifiers.is_empty()
+            && self.selected_line.is_some()
+        {
+            self.copy_selected_to_input();
             return false;
         }
 
@@ -288,28 +307,69 @@ impl Tui {
         if key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL) {
             let mut s = self.shared.lock().unwrap();
             s.lines.clear();
+            self.selected_line = None;
             return false;
         }
 
         match key.code {
-            // Scroll output with Up/Down only when input is empty and not in history
+            // Line selection & Scroll with Up/Down when input is empty
             KeyCode::Up => {
                 if self.input.is_empty() && self.hist_idx.is_none() {
-                    self.scroll = self.scroll.saturating_add(1);
+                    let s = self.shared.lock().unwrap();
+                    let total = s.lines.len();
+                    if total > 0 {
+                        let cur = self.selected_line.unwrap_or(total);
+                        if cur > 0 {
+                            let new_sel = cur - 1;
+                            self.selected_line = Some(new_sel);
+                            // Adjust scroll so new_sel is visible
+                            let (_cols, rows) = terminal::size().unwrap_or((80, 24));
+                            let h = (rows as usize).saturating_sub(5);
+                            let end = total.saturating_sub(self.scroll);
+                            let start = end.saturating_sub(h);
+                            if new_sel < start {
+                                self.scroll = total.saturating_sub(new_sel);
+                            } else if new_sel >= end {
+                                self.scroll = total.saturating_sub(new_sel + 1);
+                            }
+                        }
+                    }
                 } else {
                     self.history_prev();
                 }
             }
             KeyCode::Down => {
                 if self.input.is_empty() && self.hist_idx.is_none() {
-                    self.scroll = self.scroll.saturating_sub(1);
+                    let s = self.shared.lock().unwrap();
+                    let total = s.lines.len();
+                    if total > 0 {
+                        if let Some(cur) = self.selected_line {
+                            if cur + 1 < total {
+                                let new_sel = cur + 1;
+                                self.selected_line = Some(new_sel);
+                                // Adjust scroll so new_sel is visible
+                                let (_cols, rows) = terminal::size().unwrap_or((80, 24));
+                                let _h = (rows as usize).saturating_sub(5);
+                                let end = total.saturating_sub(self.scroll);
+                                if new_sel >= end {
+                                    self.scroll = total.saturating_sub(new_sel + 1);
+                                }
+                            }
+                        }
+                    }
                 } else {
                     self.history_next();
                 }
             }
 
-            KeyCode::PageUp   => { self.scroll = self.scroll.saturating_add(10); }
-            KeyCode::PageDown => { self.scroll = self.scroll.saturating_sub(10); }
+            KeyCode::PageUp   => {
+                self.scroll = self.scroll.saturating_add(10);
+                self.selected_line = None;
+            }
+            KeyCode::PageDown => {
+                self.scroll = self.scroll.saturating_sub(10);
+                self.selected_line = None;
+            }
 
             KeyCode::Left  => { self.cursor_left(); }
             KeyCode::Right => { self.cursor_right(); }
@@ -325,11 +385,18 @@ impl Tui {
             }
 
             KeyCode::Enter => {
+                // If input is empty but a line is selected, copy it to input
+                if self.input.is_empty() && self.selected_line.is_some() {
+                    self.copy_selected_to_input();
+                    return false;
+                }
+
                 let cmd = self.input.trim().to_string();
                 self.input.clear();
                 self.cursor = 0;
                 self.scroll = 0;        // snap to newest output
                 self.hist_idx = None;
+                self.selected_line = None;
 
                 if cmd.is_empty() { return false; }
                 if matches!(cmd.as_str(), "exit" | "quit" | "q") { return true; }
@@ -345,13 +412,32 @@ impl Tui {
             KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
                 self.input.insert(self.cursor, c);
                 self.cursor += c.len_utf8();
-                // Any typing cancels scroll-lock
                 if self.scroll > 0 { self.scroll = 0; }
+                self.selected_line = None;
             }
 
             _ => {}
         }
         false
+    }
+
+    fn copy_selected_to_input(&mut self) {
+        if let Some(sel) = self.selected_line {
+            let s = self.shared.lock().unwrap();
+            if sel < s.lines.len() {
+                let text = s.lines[sel].text.clone();
+                let clean_text = if text.starts_with("scm> ") {
+                    text[5..].trim().to_string()
+                } else {
+                    text.trim().to_string()
+                };
+                if !clean_text.is_empty() {
+                    self.input = clean_text;
+                    self.cursor = self.input.len();
+                    self.selected_line = None;
+                }
+            }
+        }
     }
 
     fn toggle_flag_at(&mut self, idx: usize) {
@@ -385,15 +471,15 @@ impl Tui {
             MouseEventKind::ScrollUp   => { self.scroll = self.scroll.saturating_add(3); }
             MouseEventKind::ScrollDown => { self.scroll = self.scroll.saturating_sub(3); }
             MouseEventKind::Down(MouseButton::Left) => {
+                let (cols, rows) = terminal::size().unwrap_or((80, 24));
+                let mx = me.column as usize;
+                let my = me.row as usize;
+
                 if self.show_flags {
-                    let (cols, rows) = terminal::size().unwrap_or((80, 24));
                     let box_w: usize = 68;
                     let box_h: usize = 16;
                     let x_start = ((cols as usize).saturating_sub(box_w)) / 2;
                     let y_start = ((rows as usize).saturating_sub(box_h)) / 2;
-
-                    let mx = me.column as usize;
-                    let my = me.row as usize;
 
                     if mx >= x_start && mx < x_start + box_w && my >= y_start && my < y_start + box_h {
                         let rel_y = my.saturating_sub(y_start);
@@ -411,6 +497,37 @@ impl Tui {
                         }
                     } else {
                         self.show_flags = false;
+                    }
+                } else if self.show_help {
+                    self.show_help = false;
+                } else {
+                    // Click in output view selects line
+                    let output_top: usize = 2;
+                    let sep2_row: usize = (rows as usize).saturating_sub(3);
+
+                    if my >= output_top && my < sep2_row {
+                        let s = self.shared.lock().unwrap();
+                        let total = s.lines.len();
+                        let h = sep2_row.saturating_sub(output_top);
+
+                        let end = total.saturating_sub(self.scroll);
+                        let start = end.saturating_sub(h);
+                        let empty_lines = h.saturating_sub(end - start);
+
+                        if my >= output_top + empty_lines {
+                            let slot = my.saturating_sub(output_top + empty_lines);
+                            let clicked_idx = start + slot;
+
+                            if clicked_idx < total {
+                                if self.selected_line == Some(clicked_idx) {
+                                    // Second click on same line copies to input prompt!
+                                    drop(s);
+                                    self.copy_selected_to_input();
+                                } else {
+                                    self.selected_line = Some(clicked_idx);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -648,19 +765,21 @@ impl Tui {
             if row >= top + height { break; }
 
             let ol = &s.lines[line_idx];
+            let is_selected = self.selected_line == Some(line_idx);
 
             // Separator → dim horizontal rule
             if ol.kind == Kind::Separator {
+                let line_bg = if is_selected { SEL_BG } else { BG };
                 queue!(stdout,
                     cursor::MoveTo(0, row),
-                    SetBackgroundColor(BG),
+                    SetBackgroundColor(line_bg),
                     SetForegroundColor(BORDER),
                     Print("─".repeat(inner_w)),
                 )?;
                 continue;
             }
 
-            let color = match ol.kind {
+            let default_color = match ol.kind {
                 Kind::CmdEcho   => CMD_ECHO,
                 Kind::KernelOk  => RESULT_OK,
                 Kind::KernelErr => RESULT_ERR,
@@ -669,16 +788,26 @@ impl Tui {
                 _               => FG,
             };
 
+            let (bg, fg) = if is_selected {
+                (SEL_BG, Color::White)
+            } else {
+                (BG, default_color)
+            };
+
+            let prefix = if is_selected { "► " } else { "" };
+            let full_text = format!("{}{}", prefix, ol.text);
+
             // Safe truncation to terminal width (character-aware, not byte-aware)
-            let display: String = ol.text.chars().take(inner_w).collect();
+            let display: String = full_text.chars().take(inner_w).collect();
             let pad = inner_w.saturating_sub(display.chars().count());
 
             queue!(stdout,
                 cursor::MoveTo(0, row),
-                SetBackgroundColor(BG),
-                SetForegroundColor(color),
+                SetBackgroundColor(bg),
+                SetForegroundColor(fg),
                 Print(&display),
                 Print(" ".repeat(pad)),
+                ResetColor,
             )?;
         }
 
@@ -689,6 +818,23 @@ impl Tui {
         let prompt = "scm> ";
         let prompt_len = prompt.chars().count();
         let avail = (cols as usize).saturating_sub(prompt_len + 1); // +1 for cursor block
+
+        // If a line is selected, show hint in input area
+        if let Some(sel) = self.selected_line {
+            let hint = format!("[Line #{} selected  │  Enter/click=copy line  │  Esc=deselect]", sel + 1);
+            let display: String = hint.chars().take(cols as usize).collect();
+            let pad = (cols as usize).saturating_sub(display.chars().count());
+
+            queue!(stdout,
+                cursor::MoveTo(0, row),
+                SetBackgroundColor(SEL_BG),
+                SetForegroundColor(Color::White),
+                Print(&display),
+                Print(" ".repeat(pad)),
+                ResetColor,
+            )?;
+            return Ok(());
+        }
 
         // Find display window for input (keep cursor in view)
         let cur_char_pos: usize = self.input[..self.cursor].chars().count();
@@ -897,9 +1043,9 @@ impl Tui {
     fn draw_help(&self, stdout: &mut io::Stdout, cols: u16, rows: u16) -> io::Result<()> {
         let entries: &[(&str, &str)] = &[
             ("KEYS",                 ""),
-            ("  Enter",              "Execute command"),
+            ("  Enter",              "Execute command (or copy selected output line)"),
             ("  Up / Down",          "Command history  (when typing)"),
-            ("  Up / Down",          "Scroll output    (when input is empty)"),
+            ("  Up / Down",          "Select output lines (when input is empty)"),
             ("  PgUp / PgDn",        "Scroll output by page"),
             ("  Left / Right",       "Move cursor in input"),
             ("  Home / End",         "Jump to start / end of input"),
@@ -907,10 +1053,11 @@ impl Tui {
             ("  Delete",             "Delete character after cursor"),
             ("  Tab",                "Insert 4 spaces"),
             ("  Ctrl+L",             "Clear output panel"),
-            ("  Mouse Wheel",        "Scroll output"),
+            ("  Mouse Click",        "Select output line / Toggle modal items"),
             ("  F1",                 "Show / hide this help"),
             ("  F2 or f",            "Flags & Modes Graphical Selection Modal"),
-            ("  Ctrl+C or Esc",      "Quit"),
+            ("  Esc",                "Deselect line / Close modal / Quit"),
+            ("  Ctrl+C",             "Quit"),
             ("",                     ""),
             ("COMMANDS",             ""),
             ("  getpid()",           "Execute any syscall or libc function"),
@@ -1068,7 +1215,7 @@ pub fn run_tui(
             s.lines.push(Line::new("  Persistent session mode (-R): state, file descriptors, and variables persist.", Kind::Warning));
         }
         s.lines.push(Line::new("  Type 'cs' to view code space.  Type 'cs run' to compile and run.", Kind::Normal));
-        s.lines.push(Line::new("  Press F1 for help overlay, F2 (or press 'f') for Flags & Modes modal.", Kind::Normal));
+        s.lines.push(Line::new("  Click or use Up/Down to select lines. Press F1 for help, F2 for Flags.", Kind::Normal));
         s.lines.push(Line::sep());
     }
 
