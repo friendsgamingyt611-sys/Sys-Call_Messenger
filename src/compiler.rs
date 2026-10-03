@@ -541,6 +541,7 @@ fn build_c_session_source(session: &SessionRunner) -> String {
             let (stmt_code, eval_code) = format_c_execution_block(clean);
             stmts_code.push_str(&stmt_code);
             stmts_code.push_str(&eval_code);
+            break;
         } else {
             if !clean.is_empty() && clean != ";" {
                 stmts_code.push_str(&format!("    {};\n", clean));
@@ -608,6 +609,9 @@ pub fn get_statement_lines(session: &SessionRunner) -> Vec<(usize, usize, usize,
         let end = current_line + line_count - 1;
         info.push((i, start, end, clean.to_string(), is_focused));
         current_line += line_count;
+        if is_focused {
+            break;
+        }
     }
 
     info

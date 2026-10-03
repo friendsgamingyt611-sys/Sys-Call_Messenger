@@ -221,6 +221,13 @@ fn process_command(
                         }
                     }
                 }
+                let printed_count = lines_info.len();
+                if printed_count < session.statements.len() {
+                    for idx in printed_count..session.statements.len() {
+                        let stmt = session.statements[idx].trim_end_matches(';').trim();
+                        println!("    \x1b[90m[{}] (below focus — omitted from execution): {}\x1b[0m", idx + 1, stmt);
+                    }
+                }
                 println!();
                 print!("  \x1b[93mselect line or statement number to focus on [1..{} or Ln]: \x1b[0m", session.statements.len());
                 use std::io::Write;
