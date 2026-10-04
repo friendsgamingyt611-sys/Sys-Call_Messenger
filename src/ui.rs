@@ -65,7 +65,6 @@ pub enum Kind {
     KernelErr,
     Warning,
     Separator,
-    Help,
 }
 
 #[derive(Clone)]
@@ -97,7 +96,6 @@ pub struct TuiState {
     pub session: SessionRunner,
     pub lines:   Vec<Line>,           // output log
     pub running: bool,
-    pub status:  String,
     // session config
     pub runner_session: bool,
     pub quick_mode:     bool,
@@ -112,7 +110,6 @@ impl TuiState {
             session: SessionRunner::new(),
             lines: Vec::new(),
             running: false,
-            status: String::new(),
             runner_session,
             quick_mode,
             auto_confirm,
@@ -782,7 +779,6 @@ impl Tui {
                 Kind::KernelOk  => RESULT_OK,
                 Kind::KernelErr => RESULT_ERR,
                 Kind::Warning   => RESULT_WARN,
-                Kind::Help      => DIM,
                 _               => FG,
             };
 

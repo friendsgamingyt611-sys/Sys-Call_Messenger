@@ -21,8 +21,6 @@
 mod compiler;
 mod daemon;
 mod editor;
-mod messenger;
-mod syscall_layer;
 mod ui;
 
 fn print_usage() {
