@@ -7,15 +7,15 @@
 //  │  SysCall Messenger  [-R] [-q]  stmts:3  focus:[2]  F1=help │  ← header
 //  ├─────────────────────────────────────────────────────────┤
 //  │                                                         │
-//  │   (scrollable output log — clickable line selection)    │  ← main area
+//  │   (scrollable output log — native terminal copy/select) │  ← main area
 //  │                                                         │
 //  ├─────────────────────────────────────────────────────────┤
 //  │  scm> _                                                 │  ← input bar
 //  └─────────────────────────────────────────────────────────┘
 //
 //  Keys:
-//    Enter        run command (or copy selected line if input empty)
-//    Up/Down      history / navigate & select output lines
+//    Enter        run command
+//    Up/Down      history / scroll output (when prompt is empty)
 //    PgUp/PgDn   scroll output by page
 //    Home/End     cursor to start/end of input
 //    Left/Right   move cursor in input (or cycle compiler in flags)
@@ -24,7 +24,7 @@
 //    Ctrl+L       clear output
 //    F1           show/hide help overlay
 //    F2 or 'f'    show/hide flags & modes graphical modal
-//    Esc          clear line selection / close overlay / quit
+//    Esc          close overlay / quit
 //    Ctrl+C       quit
 // ============================================================
 
@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
     execute, queue,
     style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal,
@@ -54,7 +54,6 @@ const RESULT_OK:   Color = Color::Rgb { r: 80,  g: 200, b: 120 };  // kernel res
 const RESULT_ERR:  Color = Color::Rgb { r: 220, g: 80,  b: 80  };  // error
 const RESULT_WARN: Color = Color::Rgb { r: 210, g: 180, b: 60  };  // warning/notice
 const CMD_ECHO:    Color = Color::Rgb { r: 100, g: 160, b: 255 };  // echoed command
-const SEL_BG:      Color = Color::Rgb { r: 35,  g: 75,  b: 140 };  // selected line blue bg
 
 // ── Output line kinds ─────────────────────────────────────────
 #[derive(Clone, PartialEq)]
@@ -141,7 +140,6 @@ pub struct Tui {
     show_help:          bool,
     show_flags:         bool,
     flags_selected_idx: usize,
-    selected_line:      Option<usize>,   // currently selected output line index
 }
 
 impl Tui {
@@ -157,7 +155,6 @@ impl Tui {
             show_help: false,
             show_flags: false,
             flags_selected_idx: 0,
-            selected_line: None,
         }
     }
 
@@ -167,6 +164,7 @@ impl Tui {
         execute!(stdout,
             terminal::EnterAlternateScreen,
             cursor::Hide,
+            EnableBracketedPaste,
         )?;
 
         let result = self.event_loop(&mut stdout);
@@ -175,6 +173,7 @@ impl Tui {
         let _ = execute!(stdout,
             terminal::LeaveAlternateScreen,
             cursor::Show,
+            DisableBracketedPaste,
         );
         let _ = terminal::disable_raw_mode();
         result
@@ -191,6 +190,7 @@ impl Tui {
                 match event::read()? {
                     Event::Key(k) => { if self.on_key(k) { break; } }
                     Event::Mouse(m) => { self.on_mouse(m); }
+                    Event::Paste(ref text) => { self.on_paste(text); }
                     _ => {}
                 }
             }
@@ -208,10 +208,6 @@ impl Tui {
             }
             if self.show_help {
                 self.show_help = false;
-                return false;
-            }
-            if self.selected_line.is_some() {
-                self.selected_line = None;
                 return false;
             }
             return true; // Quit TUI
@@ -278,23 +274,12 @@ impl Tui {
             return false;
         }
 
-        // Open Flags modal if typing 'f' or 'F' when input bar is empty and no line selected
+        // Open Flags modal if typing 'f' or 'F' when input bar is empty
         if (key.code == KeyCode::Char('f') || key.code == KeyCode::Char('F'))
             && self.input.is_empty()
-            && self.selected_line.is_none()
             && key.modifiers.is_empty()
         {
             self.show_flags = true;
-            return false;
-        }
-
-        // Copy selected line into input bar if user presses 'c' or 'y' when input is empty & line selected
-        if (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('y'))
-            && self.input.is_empty()
-            && key.modifiers.is_empty()
-            && self.selected_line.is_some()
-        {
-            self.copy_selected_to_input();
             return false;
         }
 
@@ -302,68 +287,62 @@ impl Tui {
         if key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL) {
             let mut s = self.shared.lock().unwrap();
             s.lines.clear();
-            self.selected_line = None;
+            self.scroll = 0;
             return false;
         }
 
+        // ── Dedicated Output Window Viewport Scrolling (works anytime, even while typing) ──
+        if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
+            match key.code {
+                KeyCode::Up => {
+                    let s = self.shared.lock().unwrap();
+                    let max_scroll = s.lines.len().saturating_sub(1);
+                    self.scroll = (self.scroll + 1).min(max_scroll);
+                    return false;
+                }
+                KeyCode::Down => {
+                    self.scroll = self.scroll.saturating_sub(1);
+                    return false;
+                }
+                KeyCode::Home => {
+                    let s = self.shared.lock().unwrap();
+                    self.scroll = s.lines.len().saturating_sub(1); // Auto-scroll to top
+                    return false;
+                }
+                KeyCode::End => {
+                    self.scroll = 0; // Auto-scroll to bottom (newest output)
+                    return false;
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
-            // Line selection & Scroll with Up/Down when input is empty
+            // Scroll with Up/Down when input is empty & not navigating history
             KeyCode::Up => {
                 if self.input.is_empty() && self.hist_idx.is_none() {
                     let s = self.shared.lock().unwrap();
-                    let total = s.lines.len();
-                    if total > 0 {
-                        let cur = self.selected_line.unwrap_or(total);
-                        if cur > 0 {
-                            let new_sel = cur - 1;
-                            self.selected_line = Some(new_sel);
-                            // Adjust scroll so new_sel is visible
-                            let (_cols, rows) = terminal::size().unwrap_or((80, 24));
-                            let h = (rows as usize).saturating_sub(5);
-                            let end = total.saturating_sub(self.scroll);
-                            let start = end.saturating_sub(h);
-                            if new_sel < start {
-                                self.scroll = total.saturating_sub(new_sel);
-                            } else if new_sel >= end {
-                                self.scroll = total.saturating_sub(new_sel + 1);
-                            }
-                        }
-                    }
+                    let max_scroll = s.lines.len().saturating_sub(1);
+                    self.scroll = (self.scroll + 1).min(max_scroll);
                 } else {
                     self.history_prev();
                 }
             }
             KeyCode::Down => {
                 if self.input.is_empty() && self.hist_idx.is_none() {
-                    let s = self.shared.lock().unwrap();
-                    let total = s.lines.len();
-                    if total > 0 {
-                        if let Some(cur) = self.selected_line {
-                            if cur + 1 < total {
-                                let new_sel = cur + 1;
-                                self.selected_line = Some(new_sel);
-                                // Adjust scroll so new_sel is visible
-                                let (_cols, rows) = terminal::size().unwrap_or((80, 24));
-                                let _h = (rows as usize).saturating_sub(5);
-                                let end = total.saturating_sub(self.scroll);
-                                if new_sel >= end {
-                                    self.scroll = total.saturating_sub(new_sel + 1);
-                                }
-                            }
-                        }
-                    }
+                    self.scroll = self.scroll.saturating_sub(1);
                 } else {
                     self.history_next();
                 }
             }
 
             KeyCode::PageUp   => {
-                self.scroll = self.scroll.saturating_add(10);
-                self.selected_line = None;
+                let s = self.shared.lock().unwrap();
+                let max_scroll = s.lines.len().saturating_sub(1);
+                self.scroll = (self.scroll + 10).min(max_scroll);
             }
             KeyCode::PageDown => {
                 self.scroll = self.scroll.saturating_sub(10);
-                self.selected_line = None;
             }
 
             KeyCode::Left  => { self.cursor_left(); }
@@ -380,18 +359,11 @@ impl Tui {
             }
 
             KeyCode::Enter => {
-                // If input is empty but a line is selected, copy it to input
-                if self.input.is_empty() && self.selected_line.is_some() {
-                    self.copy_selected_to_input();
-                    return false;
-                }
-
                 let cmd = self.input.trim().to_string();
                 self.input.clear();
                 self.cursor = 0;
                 self.scroll = 0;        // snap to newest output
                 self.hist_idx = None;
-                self.selected_line = None;
 
                 if cmd.is_empty() { return false; }
                 if matches!(cmd.as_str(), "exit" | "quit" | "q") { return true; }
@@ -405,10 +377,11 @@ impl Tui {
             }
 
             KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-                self.input.insert(self.cursor, c);
-                self.cursor += c.len_utf8();
-                if self.scroll > 0 { self.scroll = 0; }
-                self.selected_line = None;
+                if c != '\n' && c != '\r' {
+                    self.input.insert(self.cursor, c);
+                    self.cursor += c.len_utf8();
+                    if self.scroll > 0 { self.scroll = 0; }
+                }
             }
 
             _ => {}
@@ -416,22 +389,17 @@ impl Tui {
         false
     }
 
-    fn copy_selected_to_input(&mut self) {
-        if let Some(sel) = self.selected_line {
-            let s = self.shared.lock().unwrap();
-            if sel < s.lines.len() {
-                let text = s.lines[sel].text.clone();
-                let clean_text = if text.starts_with("scm> ") {
-                    text[5..].trim().to_string()
-                } else {
-                    text.trim().to_string()
-                };
-                if !clean_text.is_empty() {
-                    self.input = clean_text;
-                    self.cursor = self.input.len();
-                    self.selected_line = None;
-                }
-            }
+    fn on_paste(&mut self, text: &str) {
+        let clean = text
+            .replace("\r\n", " ")
+            .replace('\n', " ")
+            .replace('\r', " ")
+            .replace('\t', " ");
+        let trimmed = clean.trim();
+        if !trimmed.is_empty() {
+            self.input.insert_str(self.cursor, trimmed);
+            self.cursor += trimmed.len();
+            if self.scroll > 0 { self.scroll = 0; }
         }
     }
 
@@ -463,7 +431,11 @@ impl Tui {
 
     fn on_mouse(&mut self, me: MouseEvent) {
         match me.kind {
-            MouseEventKind::ScrollUp   => { self.scroll = self.scroll.saturating_add(3); }
+            MouseEventKind::ScrollUp   => {
+                let s = self.shared.lock().unwrap();
+                let max_scroll = s.lines.len().saturating_sub(1);
+                self.scroll = (self.scroll + 3).min(max_scroll);
+            }
             MouseEventKind::ScrollDown => { self.scroll = self.scroll.saturating_sub(3); }
             MouseEventKind::Down(MouseButton::Left) => {
                 let (cols, rows) = terminal::size().unwrap_or((80, 24));
@@ -495,35 +467,6 @@ impl Tui {
                     }
                 } else if self.show_help {
                     self.show_help = false;
-                } else {
-                    // Click in output view selects line
-                    let output_top: usize = 2;
-                    let sep2_row: usize = (rows as usize).saturating_sub(3);
-
-                    if my >= output_top && my < sep2_row {
-                        let s = self.shared.lock().unwrap();
-                        let total = s.lines.len();
-                        let h = sep2_row.saturating_sub(output_top);
-
-                        let end = total.saturating_sub(self.scroll);
-                        let start = end.saturating_sub(h);
-                        let empty_lines = h.saturating_sub(end - start);
-
-                        if my >= output_top + empty_lines {
-                            let slot = my.saturating_sub(output_top + empty_lines);
-                            let clicked_idx = start + slot;
-
-                            if clicked_idx < total {
-                                if self.selected_line == Some(clicked_idx) {
-                                    // Second click on same line copies to input prompt!
-                                    drop(s);
-                                    self.copy_selected_to_input();
-                                } else {
-                                    self.selected_line = Some(clicked_idx);
-                                }
-                            }
-                        }
-                    }
                 }
             }
             _ => {}
@@ -745,7 +688,8 @@ impl Tui {
         let h       = height as usize;
 
         // Compute visible window (newest at bottom, scroll moves window up)
-        let end   = total.saturating_sub(self.scroll);
+        let effective_scroll = self.scroll.min(total.saturating_sub(1));
+        let end   = total.saturating_sub(effective_scroll);
         let start = end.saturating_sub(h);
 
         let empty_lines = h.saturating_sub(end - start);
@@ -760,21 +704,19 @@ impl Tui {
             if row >= top + height { break; }
 
             let ol = &s.lines[line_idx];
-            let is_selected = self.selected_line == Some(line_idx);
 
             // Separator → dim horizontal rule
             if ol.kind == Kind::Separator {
-                let line_bg = if is_selected { SEL_BG } else { BG };
                 queue!(stdout,
                     cursor::MoveTo(0, row),
-                    SetBackgroundColor(line_bg),
+                    SetBackgroundColor(BG),
                     SetForegroundColor(BORDER),
                     Print("─".repeat(inner_w)),
                 )?;
                 continue;
             }
 
-            let default_color = match ol.kind {
+            let color = match ol.kind {
                 Kind::CmdEcho   => CMD_ECHO,
                 Kind::KernelOk  => RESULT_OK,
                 Kind::KernelErr => RESULT_ERR,
@@ -782,23 +724,14 @@ impl Tui {
                 _               => FG,
             };
 
-            let (bg, fg) = if is_selected {
-                (SEL_BG, Color::White)
-            } else {
-                (BG, default_color)
-            };
-
-            let prefix = if is_selected { "► " } else { "" };
-            let full_text = format!("{}{}", prefix, ol.text);
-
             // Safe truncation to terminal width (character-aware, not byte-aware)
-            let display: String = full_text.chars().take(inner_w).collect();
+            let display: String = ol.text.chars().take(inner_w).collect();
             let pad = inner_w.saturating_sub(display.chars().count());
 
             queue!(stdout,
                 cursor::MoveTo(0, row),
-                SetBackgroundColor(bg),
-                SetForegroundColor(fg),
+                SetBackgroundColor(BG),
+                SetForegroundColor(color),
                 Print(&display),
                 Print(" ".repeat(pad)),
                 ResetColor,
@@ -812,23 +745,6 @@ impl Tui {
         let prompt = "scm> ";
         let prompt_len = prompt.chars().count();
         let avail = (cols as usize).saturating_sub(prompt_len + 1); // +1 for cursor block
-
-        // If a line is selected, show hint in input area
-        if let Some(sel) = self.selected_line {
-            let hint = format!("[Line #{} selected  │  Enter/click=copy line  │  Esc=deselect]", sel + 1);
-            let display: String = hint.chars().take(cols as usize).collect();
-            let pad = (cols as usize).saturating_sub(display.chars().count());
-
-            queue!(stdout,
-                cursor::MoveTo(0, row),
-                SetBackgroundColor(SEL_BG),
-                SetForegroundColor(Color::White),
-                Print(&display),
-                Print(" ".repeat(pad)),
-                ResetColor,
-            )?;
-            return Ok(());
-        }
 
         // Find display window for input (keep cursor in view)
         let cur_char_pos: usize = self.input[..self.cursor].chars().count();
@@ -1037,9 +953,9 @@ impl Tui {
     fn draw_help(&self, stdout: &mut io::Stdout, cols: u16, rows: u16) -> io::Result<()> {
         let entries: &[(&str, &str)] = &[
             ("KEYS",                 ""),
-            ("  Enter",              "Execute command (or copy selected output line)"),
+            ("  Enter",              "Execute command"),
             ("  Up / Down",          "Command history  (when typing)"),
-            ("  Up / Down",          "Select output lines (when input is empty)"),
+            ("  Up / Down",          "Scroll output    (when input is empty)"),
             ("  PgUp / PgDn",        "Scroll output by page"),
             ("  Left / Right",       "Move cursor in input"),
             ("  Home / End",         "Jump to start / end of input"),
@@ -1047,10 +963,10 @@ impl Tui {
             ("  Delete",             "Delete character after cursor"),
             ("  Tab",                "Insert 4 spaces"),
             ("  Ctrl+L",             "Clear output panel"),
-            ("  Mouse Click",        "Select output line / Toggle modal items"),
+            ("  Mouse Click/Drag",   "Native terminal text selection / Modal toggle"),
             ("  F1",                 "Show / hide this help"),
             ("  F2 or f",            "Flags & Modes Graphical Selection Modal"),
-            ("  Esc",                "Deselect line / Close modal / Quit"),
+            ("  Esc",                "Close modal / Quit"),
             ("  Ctrl+C",             "Quit"),
             ("",                     ""),
             ("COMMANDS",             ""),
@@ -1159,6 +1075,12 @@ pub fn capture_stdout<F: FnOnce()>(f: F) -> String {
             return String::new();
         }
 
+        // Set O_NONBLOCK on read end so read() never deadlocks on inherited child write FDs
+        let flags = fcntl(pipefd[0], F_GETFL);
+        if flags != -1 {
+            fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
+        }
+
         let saved_out = dup(1);
         let saved_err = dup(2);
         dup2(pipefd[1], 1);
@@ -1174,7 +1096,7 @@ pub fn capture_stdout<F: FnOnce()>(f: F) -> String {
         close(saved_out);
         close(saved_err);
 
-        // Read from pipe
+        // Read all available output from non-blocking pipe
         let mut buf = vec![0u8; 65536];
         let mut total = Vec::new();
         loop {
@@ -1209,7 +1131,7 @@ pub fn run_tui(
             s.lines.push(Line::new("  Persistent session mode (-R): state, file descriptors, and variables persist.", Kind::Warning));
         }
         s.lines.push(Line::new("  Type 'cs' to view code space.  Type 'cs run' to compile and run.", Kind::Normal));
-        s.lines.push(Line::new("  Click or use Up/Down to select lines. Press F1 for help, F2 for Flags.", Kind::Normal));
+        s.lines.push(Line::new("  Use mouse or Up/Down (when prompt empty) to scroll. Press F1 for help, F2 for Flags.", Kind::Normal));
         s.lines.push(Line::sep());
     }
 
