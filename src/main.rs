@@ -24,7 +24,7 @@ mod editor;
 mod ui;
 
 fn print_usage() {
-    println!("\x1b[1mSysCall Messenger\x1b[0m  v1.0.0");
+    println!("\x1b[1mSysCall Messenger\x1b[0m  v1.1.0");
     println!();
     println!("  Make any Linux syscall or libc function call from the command line.");
     println!("  SCM auto-discovers headers via man pages, builds a real C program in your code space,");
